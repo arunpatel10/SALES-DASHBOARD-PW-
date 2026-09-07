@@ -217,7 +217,11 @@
   }
   .day-nav:hover{background:rgba(232,185,74,.12); border-color:rgba(232,185,74,.4); color:var(--amber);}
   .day-nav:active{transform:scale(.92);}
-  #daywiseTotalRow td, #counselorTotalRow td{border-top:2px solid var(--line-solid); background:var(--panel-2); font-family:var(--mono);}
+  #daywiseTotalRow td, #counselorTotalRow td, #weeklyTotalRow td{border-top:2px solid var(--line-solid); background:var(--panel-2); font-family:var(--mono);}
+  .heat-cell{
+    font-family:var(--mono); font-weight:700; text-align:center; border-radius:6px;
+    padding:6px 8px; display:inline-block; min-width:56px;
+  }
 
   .banner{
     font-family:var(--mono); font-size:11.5px; color:var(--muted);
@@ -308,6 +312,32 @@
       </thead>
       <tbody id="leaderboardBody"></tbody>
     </table>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <h2>Weekly Comparison</h2>
+    <div class="h-sub" id="weeklyChartSub">Week-by-week revenue vs target, team-wide</div>
+    <canvas id="weeklyChart"></canvas>
+    <table style="margin-top:18px;">
+      <thead>
+        <tr id="weeklyHeatmapHead">
+          <th>Counselor</th>
+        </tr>
+      </thead>
+      <tbody id="weeklyHeatmapBody"></tbody>
+    </table>
+    <div class="h-sub" style="margin-top:10px; margin-bottom:0;">Cells show revenue achievement % for that week &middot; green &ge;100%, gold 80&ndash;99%, red &lt;80%</div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:2px;">
+      <div>
+        <h2>Weekly Counselor Comparison</h2>
+        <div class="h-sub" id="weekCompareSub" style="margin-bottom:0;">Revenue achieved vs target, all counselors, for one week at a time</div>
+      </div>
+      <select id="weekCompareSelect"></select>
+    </div>
+    <canvas id="weekCounselorChart" style="margin-top:14px;"></canvas>
   </div>
 
   <div class="panel" style="margin-top:16px;">
@@ -606,6 +636,7 @@ function loadMonth(key){
   currentDateIdx = CONFIG.todayDay - 1;
   currentWeekIdx = weekIdxForDay(currentDateIdx);
   currentCounselorEmail = CONFIG.counselors[0].email;
+  document.getElementById('weekCompareSelect').value = ''; // force reset to latest week for the new month
 
   const monthSelect = document.getElementById('monthSelect');
   if (monthSelect.value !== key) monthSelect.value = key;
@@ -711,7 +742,7 @@ let currentVertical = 'ALL';
 let currentDateIdx = 0;
 let currentWeekIdx = 0;
 let currentCounselorEmail = null;
-let trendChart, counselorChart;
+let trendChart, counselorChart, weeklyChartInst, weekCounselorChartInst;
 
 const ICONS = {
   rupee: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 3h12M6 8h12M6 13h4a4 4 0 000-8M6 13l7 8"/></svg>',
@@ -772,12 +803,15 @@ function renderAll(){
   document.getElementById('dayChip').textContent = "Day " + CONFIG.todayDay + " / " + CONFIG.daysInMonth;
   document.getElementById('trendSub').textContent = "Daily pace across the month, team-wide (" + vertLabel + ")";
   document.getElementById('leaderboardSub').textContent = "Month-to-date achievement, ranked by revenue % (" + vertLabel + ")";
+  document.getElementById('weeklyChartSub').textContent = "Week-by-week revenue vs target, team-wide (" + vertLabel + ")";
+  document.getElementById('weekCompareSub').textContent = "Revenue achieved vs target, all counselors, for one week at a time (" + vertLabel + ")";
 
   renderSplitStrip();
   renderKPIs(agg);
   renderTrendChart(agg);
   renderGauge(agg);
   renderLeaderboard(agg);
+  renderWeeklyComparison(agg);
   renderDateSelect(agg);
   renderDaywise(agg, currentDateIdx);
   renderWeekSelect(agg);
@@ -899,6 +933,187 @@ function renderLeaderboard(agg){
       <td class="num"><span class="pct-badge ${unitCls}">${c.unitPct.toFixed(0)}%</span></td>
     </tr>`;
   }).join('');
+}
+
+function heatColor(pct){
+  if (pct >= 100) return {bg:'rgba(63,206,142,.15)', fg:'#3FCE8E'};
+  if (pct >= 80) return {bg:'rgba(232,185,74,.15)', fg:'#E8B94A'};
+  return {bg:'rgba(242,107,94,.15)', fg:'#F26B5E'};
+}
+
+// Builds per-week team totals and per-counselor-per-week breakdowns for the
+// current aggregate (vertical tab). Only counts days up to CONFIG.todayDay.
+function buildWeekly(agg){
+  const team = WEEKS.map(w => {
+    let revenue=0, units=0, revTarget=0, unitTarget=0;
+    agg.roster.forEach(c => {
+      const dt = agg.dailyTargets[c.email];
+      w.dayIndices.forEach(dayIdx => {
+        revTarget += dt.rev; unitTarget += dt.unit;
+        if (dayIdx <= CONFIG.todayDay - 1){
+          const row = agg.daywise[c.email][dayIdx];
+          revenue += row.revenue; units += row.units;
+        }
+      });
+    });
+    return {
+      revenue, units, revTarget, unitTarget,
+      revPct: revTarget>0 ? (revenue/revTarget*100) : 0,
+      unitPct: unitTarget>0 ? (units/unitTarget*100) : 0
+    };
+  });
+
+  const byCounselor = {};
+  agg.roster.forEach(c => {
+    const dt = agg.dailyTargets[c.email];
+    byCounselor[c.email] = WEEKS.map(w => {
+      let revenue=0, units=0, revTarget=0, unitTarget=0;
+      w.dayIndices.forEach(dayIdx => {
+        revTarget += dt.rev; unitTarget += dt.unit;
+        if (dayIdx <= CONFIG.todayDay - 1){
+          const row = agg.daywise[c.email][dayIdx];
+          revenue += row.revenue; units += row.units;
+        }
+      });
+      return {
+        revenue, units, revTarget, unitTarget,
+        revPct: revTarget>0 ? (revenue/revTarget*100) : 0,
+        unitPct: unitTarget>0 ? (units/unitTarget*100) : 0
+      };
+    });
+  });
+
+  return { weekLabels: WEEKS.map(w=>w.label), team, byCounselor };
+}
+
+function renderWeeklyComparison(agg){
+  const WEEKLY = buildWeekly(agg);
+
+  // ---- Weekly Comparison chart (team totals per week) ----
+  const ctx = document.getElementById('weeklyChart').getContext('2d');
+  if (weeklyChartInst) weeklyChartInst.destroy();
+  weeklyChartInst = new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels: WEEKLY.weekLabels,
+      datasets:[
+        {
+          label:'Revenue Achieved',
+          data: WEEKLY.team.map(w=>w.revenue),
+          backgroundColor: WEEKLY.team.map(w => w.revPct>=100 ? 'rgba(63,206,142,0.8)' : w.revPct>=80 ? 'rgba(232,185,74,0.8)' : 'rgba(242,107,94,0.8)'),
+          borderRadius:6, maxBarThickness:60,
+        },
+        {
+          label:'Revenue Target',
+          data: WEEKLY.team.map(w=>w.revTarget),
+          backgroundColor:'rgba(135,146,172,0.25)',
+          borderRadius:6, maxBarThickness:60,
+        }
+      ]
+    },
+    options:{
+      responsive:true,
+      plugins:{
+        legend:{labels:{color:'#8792AC', font:{family:'JetBrains Mono', size:11}, boxWidth:14}},
+        tooltip:{
+          backgroundColor:'#131B2E', borderColor:'#26314F', borderWidth:1, padding:10, cornerRadius:8,
+          titleColor:'#F1F4FA', bodyColor:'#F1F4FA', titleFont:{family:'JetBrains Mono', size:11}, bodyFont:{family:'JetBrains Mono', size:11},
+          callbacks:{
+            label: c => c.dataset.label+': '+fmtINR(c.raw),
+            afterBody: items => {
+              const w = WEEKLY.team[items[0].dataIndex];
+              return 'Achievement: '+w.revPct.toFixed(0)+'% rev \u00b7 '+w.unitPct.toFixed(0)+'% units';
+            }
+          }
+        }
+      },
+      scales:{
+        x:{ ticks:{color:'#8792AC', font:{family:'JetBrains Mono', size:10}}, grid:{display:false} },
+        y:{ ticks:{color:'#8792AC', font:{family:'JetBrains Mono', size:10}, callback:v=>'\u20b9'+(v/100000).toFixed(1)+'L'}, grid:{color:'#1B243680'} }
+      }
+    }
+  });
+
+  // ---- Weekly heatmap (counselor x week grid) ----
+  const headRow = document.getElementById('weeklyHeatmapHead');
+  headRow.innerHTML = '<th>Counselor</th>' + WEEKLY.weekLabels.map((label,i) => `<th class="num">Week ${i+1}</th>`).join('');
+
+  const heatBody = document.getElementById('weeklyHeatmapBody');
+  heatBody.innerHTML = agg.roster.map(c => {
+    const weeks = WEEKLY.byCounselor[c.email];
+    const cells = weeks.map(w => {
+      const col = heatColor(w.revPct);
+      return `<td class="num"><span class="heat-cell" style="background:${col.bg}; color:${col.fg};">${w.revPct.toFixed(0)}%</span></td>`;
+    }).join('');
+    return `<tr><td><span class="name">${c.name}</span></td>${cells}</tr>`;
+  }).join('');
+
+  // ---- Weekly Counselor Comparison (select + horizontal bar chart) ----
+  const weekSelect = document.getElementById('weekCompareSelect');
+  const prevValue = weekSelect.value;
+  weekSelect.innerHTML = '';
+  WEEKLY.weekLabels.forEach((label,i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = label;
+    weekSelect.appendChild(opt);
+  });
+  const maxWeekIdx = weekIdxForDay(CONFIG.todayDay - 1);
+  const restoreIdx = prevValue !== '' && Number(prevValue) < WEEKLY.weekLabels.length ? Number(prevValue) : maxWeekIdx;
+  weekSelect.value = restoreIdx;
+
+  function renderWeekCounselorChart(weekIdx){
+    const rows = agg.roster.map(c => ({
+      name: c.name,
+      ...WEEKLY.byCounselor[c.email][weekIdx]
+    })).sort((a,b) => b.revPct - a.revPct);
+
+    const wctx = document.getElementById('weekCounselorChart').getContext('2d');
+    if (weekCounselorChartInst) weekCounselorChartInst.destroy();
+    weekCounselorChartInst = new Chart(wctx, {
+      type:'bar',
+      data:{
+        labels: rows.map(r=>r.name),
+        datasets:[
+          {
+            label:'Revenue Achieved',
+            data: rows.map(r=>r.revenue),
+            backgroundColor: rows.map(r => r.revPct>=100 ? 'rgba(63,206,142,0.8)' : r.revPct>=80 ? 'rgba(232,185,74,0.8)' : 'rgba(242,107,94,0.8)'),
+            borderRadius:5, maxBarThickness:26,
+          },
+          {
+            label:'Revenue Target',
+            data: rows.map(r=>r.revTarget),
+            backgroundColor:'rgba(135,146,172,0.22)',
+            borderRadius:5, maxBarThickness:26,
+          }
+        ]
+      },
+      options:{
+        indexAxis:'y',
+        responsive:true,
+        plugins:{
+          legend:{labels:{color:'#8792AC', font:{family:'JetBrains Mono', size:11}, boxWidth:14}},
+          tooltip:{
+            backgroundColor:'#131B2E', borderColor:'#26314F', borderWidth:1, padding:10, cornerRadius:8,
+            titleColor:'#F1F4FA', bodyColor:'#F1F4FA', titleFont:{family:'JetBrains Mono', size:11}, bodyFont:{family:'JetBrains Mono', size:11},
+            callbacks:{
+              label: c => c.dataset.label+': '+fmtINR(c.raw),
+              afterBody: items => {
+                const r = rows[items[0].dataIndex];
+                return 'Achievement: '+r.revPct.toFixed(0)+'% rev \u00b7 '+r.unitPct.toFixed(0)+'% units';
+              }
+            }
+          }
+        },
+        scales:{
+          x:{ ticks:{color:'#8792AC', font:{family:'JetBrains Mono', size:10}, callback:v=>'\u20b9'+(v/1000).toFixed(0)+'K'}, grid:{color:'#1B243680'} },
+          y:{ ticks:{color:'#8792AC', font:{family:'JetBrains Mono', size:11}}, grid:{display:false} }
+        }
+      }
+    });
+  }
+  renderWeekCounselorChart(parseInt(weekSelect.value));
+  weekSelect.onchange = e => renderWeekCounselorChart(parseInt(e.target.value));
 }
 
 function renderDateSelect(agg){
